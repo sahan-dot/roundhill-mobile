@@ -53,10 +53,11 @@ def load_snapshot():
         req = urllib.request.Request(SNAPSHOT_API_URL)
         req.add_header("Accept", "application/vnd.github.v3.raw")
         if gh_token:
-            req.add_header("Authorization", f"token {gh_token}")
+            req.add_header("Authorization", f"Bearer {gh_token}")
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
-    except Exception:
+    except Exception as e:
+        st.error(f"Debug: {e}")
         return None
 
 
