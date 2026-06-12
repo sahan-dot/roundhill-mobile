@@ -43,6 +43,22 @@ ETF_MAP = {
 
 WHT_RATE = 0.15
 
+START = (date.today() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+
+NEGATIVE_WORDS = {
+    "lawsuit","fraud","investigation","subpoena","recall","downgrade",
+    "miss","missed","loss","losses","decline","fell","fall","cut","cuts",
+    "layoff","breach","fine","penalty","warning","delay","default",
+    "bankruptcy","probe","charges","violation","disappoints","weak",
+    "sell","underperform","drops","slumps","plunges","sinks",
+}
+POSITIVE_WORDS = {
+    "beat","beats","record","upgrade","raise","raised","growth","surges",
+    "jumps","soars","outperform","buy","strong","partnership","deal",
+    "contract","profit","approval","approved","launch","breakthrough",
+    "milestone","positive","gains","rallies","climbs",
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -85,6 +101,165 @@ def _finnhub_client():
 def _verdict_emoji(v):
     return {"STRONG BUY": "🟢", "BUY": "🔵", "HOLD": "🟡",
             "CAUTION": "🟠", "AVOID": "🔴"}.get(v, "⚪")
+
+
+def _flag(title: str) -> str:
+    tl = title.lower()
+    if any(w in tl for w in NEGATIVE_WORDS):
+        return "🔴"
+    if any(w in tl for w in POSITIVE_WORDS):
+        return "🟢"
+    return "⚪"
+
+
+# ── ETF-level scoring (ported from roundhill_web.py) ─────────────────────────
+
+def _strip_tz(idx):
+    if hasattr(idx, "tz") and idx.tz is not None:
+        return idx.tz_localize(None)
+    return idx
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_price(ticker):
+    df = yf.download(ticker, start=START, auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df if len(df) > 10 else None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_dividends(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        divs = t.dividends
+        if divs is None or len(divs) == 0:
+            return pd.Series(dtype=float)
+        divs.index = _strip_tz(divs.index)
+        return divs[divs.index >= pd.Timestamp(START)]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _nav_health(price_df, divs):
+    if price_df is None or len(price_df) < 5:
+        return None
+    fp = float(price_df["Close"].iloc[0])
+    lp = float(price_df["Close"].iloc[-1])
+    pch = (lp - fp) / fp * 100
+    age_days = (price_df.index[-1] - price_df.index[0]).days
+    yrs = max(age_days / 365.25, 0.05)
+    ann = pch / yrs
+    tdp = float(divs.sum()) / fp * 100 if len(divs) > 0 else 0.0
+    tr = pch + tdp
+    if   ann >= 50:  ns = 10.0
+    elif ann >= 30:  ns = 9.0
+    elif ann >= 15:  ns = 8.0
+    elif ann >= 8:   ns = 7.0
+    elif ann >= 0:   ns = 6.0
+    elif ann >= -5:  ns = 4.5
+    elif ann >= -10: ns = 3.0
+    elif ann >= -20: ns = 1.5
+    elif ann >= -35: ns = 0.5
+    else:            ns = 0.0
+    if tr > 0 and pch < 0:
+        ns = min(ns + 0.5, 10.0)
+    return {"nav_score": ns}
+
+
+def _detect_div_freq(divs):
+    if len(divs) < 2:
+        return 52, 4, 12
+    gaps = divs.sort_index().index.to_series().diff().dropna().dt.days
+    avg = gaps.mean()
+    if avg <= 14:  return 52, 4, 12
+    if avg <= 45:  return 12, 3, 9
+    if avg <= 100: return 4, 2, 6
+    return 1, 1, 2
+
+
+def _yield_analysis(price_df, divs):
+    if len(divs) < 2:
+        return {"yield_score": 0}
+    cp = float(price_df["Close"].iloc[-1])
+    ds = divs.sort_index()
+    freq, recent_n, lookback = _detect_div_freq(ds)
+    r_recent = ds.iloc[-recent_n:]
+    old = ds.iloc[-lookback:-recent_n] if len(ds) >= lookback else ds.iloc[:-recent_n]
+    aw = float(r_recent.mean())
+    ao = float(old.mean()) if len(old) > 0 else aw
+    ay = aw * freq / cp * 100
+    trend = "N/A"
+    if len(ds) >= recent_n * 2:
+        trend = ("Rising" if aw > ao * 1.05 else
+                 "Falling" if aw < ao * 0.95 else "Stable")
+    if   ay >= 100: ys = 10.0
+    elif ay >= 80:  ys = 9.0
+    elif ay >= 60:  ys = 8.0
+    elif ay >= 45:  ys = 7.0
+    elif ay >= 30:  ys = 6.0
+    elif ay >= 20:  ys = 5.0
+    elif ay >= 12:  ys = 3.5
+    elif ay >= 6:   ys = 2.0
+    else:           ys = 0.5
+    if trend == "Falling": ys = max(ys - 1.5, 0)
+    elif trend == "Rising": ys = min(ys + 0.5, 10.0)
+    return {"yield_score": ys}
+
+
+def _underlying_analysis(und):
+    df = _fetch_price(und)
+    if df is None or len(df) < 50:
+        return None
+    c = float(df["Close"].iloc[-1])
+    def sr(n): return (c / float(df["Close"].iloc[-n]) - 1) * 100 if len(df) > n else np.nan
+    r1m, r3m, r6m = sr(21), sr(63), sr(126)
+    ma50 = float(df["Close"].iloc[-50:].mean()) if len(df) >= 50 else np.nan
+    ma200 = float(df["Close"].iloc[-200:].mean()) if len(df) >= 200 else np.nan
+    a50 = (c > ma50) if not np.isnan(ma50) else None
+    a200 = (c > ma200) if not np.isnan(ma200) else None
+    sc = 5.0
+    if a200:  sc += 1.5
+    if a50:   sc += 1.0
+    if not np.isnan(r1m):
+        if   r1m > 10: sc += 0.75
+        elif r1m > 3:  sc += 0.5
+        elif r1m > 0:  sc += 0.25
+    if not np.isnan(r3m):
+        if   r3m > 20: sc += 1.0
+        elif r3m > 8:  sc += 0.75
+        elif r3m > 0:  sc += 0.35
+    if not np.isnan(r6m):
+        if   r6m > 30: sc += 1.0
+        elif r6m > 12: sc += 0.75
+        elif r6m > 0:  sc += 0.35
+    if not a200: sc -= 2.0
+    if not a50:  sc -= 1.0
+    if not np.isnan(r3m) and r3m < -15: sc -= 1.0
+    if not np.isnan(r6m) and r6m < -20: sc -= 1.5
+    sc = max(0.0, min(10.0, sc))
+    return {"score": sc}
+
+
+def _compute_etf_scores(etf_ticker, underlying):
+    """Compute nav_score, yield_score, momentum_score for an ETF."""
+    nav_sc, yld_sc, mom_sc = None, None, None
+    try:
+        price_df = _fetch_price(etf_ticker)
+        divs = _fetch_dividends(etf_ticker)
+        if price_df is not None:
+            nav = _nav_health(price_df, divs)
+            if nav:
+                nav_sc = nav["nav_score"]
+            ya = _yield_analysis(price_df, divs)
+            if ya:
+                yld_sc = ya["yield_score"]
+        ua = _underlying_analysis(underlying)
+        if ua:
+            mom_sc = ua["score"]
+    except Exception:
+        pass
+    return nav_sc, yld_sc, mom_sc
 
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -178,7 +353,7 @@ with tab1:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Claude Scores
+# TAB 2 — Claude Scores (with full ETF-level scoring)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab2:
@@ -193,7 +368,8 @@ with tab2:
             meta = ETF_MAP.get(etf, {})
             underlying = meta.get("underlying", etf)
             try:
-                score = unified_score(underlying)
+                nav_sc, yld_sc, mom_sc = _compute_etf_scores(etf, underlying)
+                score = unified_score(underlying, nav_score=nav_sc, yield_score=yld_sc, momentum_score=mom_sc)
                 verdict = unified_verdict(score)
             except Exception:
                 score = None
@@ -213,7 +389,7 @@ with tab2:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — News
+# TAB 3 — News (with sentiment highlighting)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab3:
@@ -244,7 +420,8 @@ with tab3:
                         else:
                             hrs = delta.seconds // 3600
                             age = f"{hrs}h ago" if hrs else "just now"
-                    st.markdown(f"- [{headline}]({url})  \n  *{source} · {age}*")
+                    sentiment = _flag(headline)
+                    st.markdown(f"- {sentiment} [{headline}]({url})  \n  *{source} · {age}*")
             except Exception as e:
                 st.info(f"Could not fetch market news: {e}")
 
@@ -262,13 +439,14 @@ with tab3:
                         headline = item.get("headline", "")
                         url = item.get("url", "")
                         source = item.get("source", "")
-                        st.markdown(f"- [{headline}]({url})  \n  *{source}*")
+                        sentiment = _flag(headline)
+                        st.markdown(f"- {sentiment} [{headline}]({url})  \n  *{source}*")
             except Exception:
                 pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — Dividends
+# TAB 4 — Dividends (with new-data alert)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab4:
@@ -318,6 +496,16 @@ with tab4:
         })
 
     if rows:
+        # Check if dividend data is new since last visit
+        if "last_seen_ex_date" not in st.session_state:
+            st.session_state.last_seen_ex_date = None
+
+        if latest_ex and latest_ex != st.session_state.last_seen_ex_date:
+            if st.session_state.last_seen_ex_date is not None:
+                st.success(f"🔔 New dividend data! Ex-date: **{latest_ex}** | Pay date: **{latest_pay}**")
+                st.balloons()
+            st.session_state.last_seen_ex_date = latest_ex
+
         st.caption(f"Ex-Date: **{latest_ex}**  |  Pay Date: **{latest_pay}**")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
