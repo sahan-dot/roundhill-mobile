@@ -328,15 +328,12 @@ with tab1:
     else:
         port_val = snap_port_val
 
-    div_contribution = snap.get("div_contribution", 0)
-
     c1, c2 = st.columns(2)
     c1.metric("Portfolio Value", f"A${port_val:,.0f}")
     c2.metric("MTD Return", f"{mtd_pct:+.2f}%", delta=f"A${mtd_total:+,.0f}")
 
-    c3, c4 = st.columns(2)
+    c3, _ = st.columns(2)
     c3.metric("MTD Dividends", f"A${mtd_div:,.0f}")
-    c4.metric("Div % of Return", f"{div_contribution:.1f}%")
 
     st.caption(f"Price P&L: A${mtd_price_pl:+,.0f}  |  Dividends: A${mtd_div:+,.0f}  |  Realized: A${mtd_realized:+,.0f}")
 
