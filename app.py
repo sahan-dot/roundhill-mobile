@@ -304,11 +304,17 @@ tab1, tab2, tab3, tab4 = st.tabs(["📈 MTD Returns", "⭐ Scores", "📰 News",
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab1:
-    month_start_val = snap.get("month_start_value_aud", 0)
+    # Use pre-computed MTD figures from the main Streamlit app's snapshot
+    mtd_pct = snap.get("mtd_pct", 0)
+    mtd_total = snap.get("mtd_total", 0)
+    mtd_price_pl = snap.get("mtd_price_pl", 0)
     mtd_div = snap.get("mtd_dividends", 0)
     mtd_realized = snap.get("mtd_realized", 0)
+    month_start_val = snap.get("month_start_value_aud", 0)
     cash_aud = snap.get("cash_aud", 0)
+    snap_port_val = snap.get("portfolio_value", 0)
 
+    # Live portfolio value for display
     with st.spinner("Fetching live prices..."):
         audusd = _yf_price("AUDUSD=X")
         prices = {}
@@ -319,57 +325,49 @@ with tab1:
         equity_usd = sum(qty_map[s] * prices[s] for s in pos_syms)
         equity_aud = equity_usd / audusd
         port_val = equity_aud + cash_aud
-
-        month_start_equity = month_start_val - cash_aud
-        mtd_price = equity_aud - month_start_equity
-        mtd_total = mtd_price + mtd_div + mtd_realized
-        mtd_pct = (mtd_total / month_start_val * 100) if month_start_val else 0
-
-        c1, c2 = st.columns(2)
-        c1.metric("Portfolio Value", f"A${port_val:,.0f}")
-        c2.metric("MTD Return", f"{mtd_pct:+.2f}%", delta=f"A${mtd_total:+,.0f}")
-
-        st.caption(f"Price P&L: A${mtd_price:+,.0f}  |  Dividends: A${mtd_div:+,.0f}")
-
-        # Cumulative MTD chart
-        today = date.today()
-        mtd_start = today.replace(day=1)
-        try:
-            price_data = yf.download(
-                pos_syms + ["AUDUSD=X"],
-                start=(mtd_start - timedelta(days=5)).strftime("%Y-%m-%d"),
-                auto_adjust=False, progress=False,
-            )["Close"]
-
-            if isinstance(price_data.columns, pd.MultiIndex):
-                price_data.columns = price_data.columns.get_level_values(-1)
-
-            price_data = price_data.dropna(how="all")
-            if not price_data.empty and "AUDUSD=X" in price_data.columns:
-                fx_col = price_data["AUDUSD=X"].ffill()
-                daily_equity = pd.Series(0.0, index=price_data.index)
-                for sym in pos_syms:
-                    if sym in price_data.columns:
-                        daily_equity += price_data[sym].ffill() * qty_map[sym]
-                daily_equity_aud = daily_equity / fx_col
-
-                pre_month = daily_equity_aud[daily_equity_aud.index < pd.Timestamp(mtd_start)]
-                base = pre_month.iloc[-1] if not pre_month.empty else daily_equity_aud.iloc[0]
-
-                month_data = daily_equity_aud[daily_equity_aud.index >= pd.Timestamp(mtd_start)]
-                if not month_data.empty:
-                    cum_ret = ((month_data - base) / month_start_val * 100).round(2)
-                    chart_df = pd.DataFrame({"MTD Return %": cum_ret.values}, index=cum_ret.index)
-                    st.line_chart(chart_df, y="MTD Return %", use_container_width=True)
-        except Exception:
-            pass
-
-        st.caption(f"Snapshot updated: {snap.get('updated', '?')}  |  Prices: yfinance live")
     else:
-        st.warning("Could not fetch all live prices.")
-        mtd_pct = snap.get("mtd_pct", 0)
-        mtd_total = snap.get("mtd_total", 0)
-        st.metric("MTD Return (stored)", f"{mtd_pct:+.2f}%", delta=f"A${mtd_total:+,.0f}")
+        port_val = snap_port_val
+
+    c1, c2 = st.columns(2)
+    c1.metric("Portfolio Value", f"A${port_val:,.0f}")
+    c2.metric("MTD Return", f"{mtd_pct:+.2f}%", delta=f"A${mtd_total:+,.0f}")
+
+    st.caption(f"Price P&L: A${mtd_price_pl:+,.0f}  |  Dividends: A${mtd_div:+,.0f}  |  Realized: A${mtd_realized:+,.0f}")
+
+    # Cumulative MTD chart
+    today = date.today()
+    mtd_start = today.replace(day=1)
+    try:
+        price_data = yf.download(
+            pos_syms + ["AUDUSD=X"],
+            start=(mtd_start - timedelta(days=5)).strftime("%Y-%m-%d"),
+            auto_adjust=False, progress=False,
+        )["Close"]
+
+        if isinstance(price_data.columns, pd.MultiIndex):
+            price_data.columns = price_data.columns.get_level_values(-1)
+
+        price_data = price_data.dropna(how="all")
+        if not price_data.empty and "AUDUSD=X" in price_data.columns:
+            fx_col = price_data["AUDUSD=X"].ffill()
+            daily_equity = pd.Series(0.0, index=price_data.index)
+            for sym in pos_syms:
+                if sym in price_data.columns:
+                    daily_equity += price_data[sym].ffill() * qty_map[sym]
+            daily_equity_aud = daily_equity / fx_col
+
+            pre_month = daily_equity_aud[daily_equity_aud.index < pd.Timestamp(mtd_start)]
+            base = pre_month.iloc[-1] if not pre_month.empty else daily_equity_aud.iloc[0]
+
+            month_data = daily_equity_aud[daily_equity_aud.index >= pd.Timestamp(mtd_start)]
+            if not month_data.empty:
+                cum_ret = ((month_data - base) / month_start_val * 100).round(2)
+                chart_df = pd.DataFrame({"MTD Return %": cum_ret.values}, index=cum_ret.index)
+                st.line_chart(chart_df, y="MTD Return %", use_container_width=True)
+    except Exception:
+        pass
+
+    st.caption(f"Snapshot updated: {snap.get('updated', '?')}  |  MTD from Streamlit app")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
