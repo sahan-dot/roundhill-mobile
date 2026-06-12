@@ -21,6 +21,7 @@ from roundhill_scraper import scrape_multiple_roundhill_etfs, is_roundhill_etf
 # ── Config ───────────────────────────────────────────────────────────────────
 
 SNAPSHOT_API_URL = "https://api.github.com/repos/sahan-dot/roundhill-bot/contents/portfolio_snapshot.json"
+SCORE_HISTORY_API_URL = "https://api.github.com/repos/sahan-dot/roundhill-bot/contents/score_history.json"
 
 ETF_MAP = {
     "AAPW": {"underlying": "AAPL",  "name": "Apple"},
@@ -75,6 +76,25 @@ def load_snapshot():
     except Exception as e:
         st.error(f"Debug: {e}")
         return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_score_history():
+    """Load dated score history from GitHub. Returns {date_str: {etf: {score, verdict}}}."""
+    try:
+        gh_token = st.secrets.get("GITHUB_TOKEN", "")
+        req = urllib.request.Request(SCORE_HISTORY_API_URL)
+        req.add_header("Accept", "application/vnd.github.v3.raw")
+        if gh_token:
+            req.add_header("Authorization", f"Bearer {gh_token}")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if "history" in data:
+            return data["history"]
+        # Legacy flat format — treat as yesterday
+        return {(date.today() - timedelta(days=1)).isoformat(): data}
+    except Exception:
+        return {}
 
 
 def _yf_price(symbol: str) -> float | None:
@@ -362,6 +382,18 @@ with tab2:
     portfolio_etfs = [s for s in pos_syms if s in ETF_MAP]
     all_etfs = portfolio_etfs + [e for e in ETF_MAP if e not in portfolio_etfs]
 
+    # Load previous scores for delta calculation
+    score_hist = load_score_history()
+    sorted_dates = sorted(score_hist.keys())
+    # Find yesterday's scores (most recent date that isn't today)
+    today_str = date.today().isoformat()
+    prev_scores = {}
+    for d in reversed(sorted_dates):
+        if d != today_str:
+            prev_scores = score_hist[d]
+            prev_date = d
+            break
+
     with st.spinner("Computing scores..."):
         rows = []
         for etf in all_etfs:
@@ -375,17 +407,34 @@ with tab2:
                 score = None
                 verdict = "N/A"
 
+            # Calculate delta from previous day
+            delta_str = ""
+            if score is not None and etf in prev_scores:
+                prev = prev_scores[etf]
+                prev_val = prev.get("claude_score") or prev.get("score")
+                if prev_val is not None:
+                    delta = score - float(prev_val)
+                    if abs(delta) >= 0.05:
+                        arrow = "▲" if delta > 0 else "▼"
+                        delta_str = f" {arrow}{abs(delta):+.1f}"[:-0] if delta else ""
+                        delta_str = f" {arrow}{abs(delta):.1f}"
+
             in_portfolio = "✅" if etf in portfolio_etfs else ""
             rows.append({
                 "": in_portfolio,
                 "ETF": etf,
                 "Underlying": meta.get("name", underlying),
-                "Score": f"{score:.1f}" if score else "—",
+                "Score": (f"{score:.1f}{delta_str}" if score else "—"),
                 "Verdict": f"{_verdict_emoji(verdict)} {verdict}",
             })
 
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if prev_scores:
+        st.caption(f"Changes vs. {prev_date}")
+    else:
+        st.caption("Score changes will appear after the next daily alert run.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
