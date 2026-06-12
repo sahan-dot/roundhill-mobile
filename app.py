@@ -20,7 +20,7 @@ from roundhill_scraper import scrape_multiple_roundhill_etfs, is_roundhill_etf
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-SNAPSHOT_URL = "https://raw.githubusercontent.com/sahan-dot/roundhill-bot/main/portfolio_snapshot.json"
+SNAPSHOT_API_URL = "https://api.github.com/repos/sahan-dot/roundhill-bot/contents/portfolio_snapshot.json"
 
 ETF_MAP = {
     "AAPW": {"underlying": "AAPL",  "name": "Apple"},
@@ -49,7 +49,12 @@ WHT_RATE = 0.15
 @st.cache_data(ttl=300, show_spinner=False)
 def load_snapshot():
     try:
-        with urllib.request.urlopen(SNAPSHOT_URL, timeout=10) as resp:
+        gh_token = st.secrets.get("GITHUB_TOKEN", "")
+        req = urllib.request.Request(SNAPSHOT_API_URL)
+        req.add_header("Accept", "application/vnd.github.v3.raw")
+        if gh_token:
+            req.add_header("Authorization", f"token {gh_token}")
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except Exception:
         return None
