@@ -340,39 +340,6 @@ with tab1:
 
     st.caption(f"Price P&L: A${mtd_price_pl:+,.0f}  |  Dividends: A${mtd_div:+,.0f}  |  Realized: A${mtd_realized:+,.0f}")
 
-    # Cumulative MTD chart
-    today = date.today()
-    mtd_start = today.replace(day=1)
-    try:
-        price_data = yf.download(
-            pos_syms + ["AUDUSD=X"],
-            start=(mtd_start - timedelta(days=5)).strftime("%Y-%m-%d"),
-            auto_adjust=False, progress=False,
-        )["Close"]
-
-        if isinstance(price_data.columns, pd.MultiIndex):
-            price_data.columns = price_data.columns.get_level_values(-1)
-
-        price_data = price_data.dropna(how="all")
-        if not price_data.empty and "AUDUSD=X" in price_data.columns:
-            fx_col = price_data["AUDUSD=X"].ffill()
-            daily_equity = pd.Series(0.0, index=price_data.index)
-            for sym in pos_syms:
-                if sym in price_data.columns:
-                    daily_equity += price_data[sym].ffill() * qty_map[sym]
-            daily_equity_aud = daily_equity / fx_col
-
-            pre_month = daily_equity_aud[daily_equity_aud.index < pd.Timestamp(mtd_start)]
-            base = pre_month.iloc[-1] if not pre_month.empty else daily_equity_aud.iloc[0]
-
-            month_data = daily_equity_aud[daily_equity_aud.index >= pd.Timestamp(mtd_start)]
-            if not month_data.empty:
-                cum_ret = ((month_data - base) / month_start_val * 100).round(2)
-                chart_df = pd.DataFrame({"MTD Return %": cum_ret.values}, index=cum_ret.index)
-                st.line_chart(chart_df, y="MTD Return %", use_container_width=True)
-    except Exception:
-        pass
-
     st.caption(f"Snapshot updated: {snap.get('updated', '?')}  |  MTD from Streamlit app")
 
 
